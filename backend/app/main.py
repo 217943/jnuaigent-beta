@@ -1,86 +1,121 @@
-from __future__ import annotations
-
 import csv
+import io
 import json
 import uuid
 from datetime import datetime, timezone
-from io import StringIO
-from typing import List, Optional
+from typing import Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from app.db import get_db, init_db
-from app.triage import TriageError, triage_request
+from .db import get_db, init_db
+from .triage import TriageError, triage_request
 
-app = FastAPI(title="AI Clinic Triage Backend")
+
+class TriagePayload(BaseModel):
+    case_id: str
+    role: Literal["student", "professor", "staff", "other"]
+    issue_type: Literal[
+        "mental_health",
+        "medical",
+        "academic",
+        "administrative",
+        "safety",
+        "other",
+    ]
+    urgency: Literal["low", "medium", "high", "critical"]
+    risk_flags: List[
+        Literal[
+            "self_harm",
+            "harm_to_others",
+            "severe_distress",
+            "medical_emergency",
+            "abuse_or_violence",
+            "none",
+        ]
+    ]
+    recommended_channel: Literal[
+        "campus_counseling",
+        "campus_health_center",
+        "emergency_services",
+        "academic_advising",
+        "hr_admin",
+        "campus_security",
+        "other",
+    ]
+    needs_followup: bool
+    summary_ko: str
+    confidence: float = Field(ge=0, le=1)
 
 
 class RequestCreate(BaseModel):
-    user_role: Optional[str] = Field(default=None)
-    modality_pref: Optional[str] = Field(default=None)
-    request_text: str = Field(min_length=1, max_length=500)
-    tools_hint: Optional[str] = Field(default=None)
+    request_text: str = Field(min_length=1)
+    user_role: Optional[Literal["student", "professor", "staff", "other"]] = None
+    modality_pref: Optional[str] = None
+    tools_hint: Optional[str] = None
 
 
-class RequestResponse(BaseModel):
-    request_id: str
-    triage: dict
-    needs_human_review: bool
+class RequestRecord(BaseModel):
+    id: str
+    request_text: str
+    triage: TriagePayload
+    status: Literal["pending", "approved", "rejected"] = "pending"
+    note: Optional[str] = None
+    created_at: str
 
 
-class DecisionCreate(BaseModel):
-    action: str = Field(pattern="^(approve|reject|edit)$")
-    final_topic: Optional[str] = Field(default=None)
-    final_difficulty: Optional[str] = Field(default=None)
-    final_handler: Optional[str] = Field(default=None)
-    note: Optional[str] = Field(default=None)
+class DecisionPayload(BaseModel):
+    action: Literal["approve", "reject"]
+    final_topic: Optional[TriagePayload.__annotations__["issue_type"]] = None
+    final_difficulty: Optional[TriagePayload.__annotations__["urgency"]] = None
+    final_handler: Optional[TriagePayload.__annotations__["recommended_channel"]] = None
+    note: Optional[str] = None
+
+
+app = FastAPI(title="AI Clinic Triage MVP API")
 
 
 @app.on_event("startup")
-def startup() -> None:
+def prepare_db() -> None:
     init_db()
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def serialize_request(row: Dict) -> RequestRecord:
+    triage = json.loads(row["triage_json"])
+    return RequestRecord(
+        id=row["id"],
+        request_text=row["request_text"],
+        triage=TriagePayload(**triage),
+        status=row["status"],
+        note=row.get("note"),
+        created_at=row["created_at"],
+    )
 
 
-def map_status(action: str) -> str:
-    if action == "approve":
-        return "approved"
-    if action == "reject":
-        return "rejected"
-    return "pending"
-
-
-@app.post("/api/requests", response_model=RequestResponse)
-def create_request(payload: RequestCreate, db=Depends(get_db)) -> RequestResponse:
-    if len(payload.request_text) > 500:
-        raise HTTPException(status_code=400, detail="request_text exceeds 500 characters")
-
+@app.post("/api/requests", response_model=RequestRecord)
+def create_request(payload: RequestCreate, db=Depends(get_db)) -> RequestRecord:
     try:
         triage_result = triage_request(payload.request_text, payload.user_role)
     except TriageError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    request_id = str(uuid.uuid4())
-    created_at = now_iso()
-    triage_json = json.dumps(triage_result.triage, ensure_ascii=False)
-    risk_flags_json = json.dumps(
-        {
-            "risk_flags": triage_result.risk_flags,
-            "pii_flags": triage_result.pii_flags,
-        },
-        ensure_ascii=False,
-    )
+    triage_payload = TriagePayload(**triage_result.triage)
+    request_id = f"REQ-{uuid.uuid4()}"
+    created_at = datetime.now(timezone.utc).isoformat()
     with db:
         db.execute(
             """
             INSERT INTO requests (
-                id, created_at, user_role, modality_pref, request_text, tools_hint,
-                status, triage_json, triage_confidence, risk_flags_json
+                id,
+                created_at,
+                user_role,
+                modality_pref,
+                request_text,
+                tools_hint,
+                status,
+                triage_json,
+                triage_confidence,
+                risk_flags_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -91,89 +126,90 @@ def create_request(payload: RequestCreate, db=Depends(get_db)) -> RequestRespons
                 payload.request_text,
                 payload.tools_hint,
                 "pending",
-                triage_json,
+                json.dumps(triage_result.triage, ensure_ascii=False),
                 triage_result.confidence,
-                risk_flags_json,
+                json.dumps(triage_result.risk_flags, ensure_ascii=False),
             ),
         )
-
-    return RequestResponse(
-        request_id=request_id,
-        triage=triage_result.triage,
-        needs_human_review=triage_result.needs_human_review,
+    return RequestRecord(
+        id=request_id,
+        request_text=payload.request_text,
+        triage=triage_payload,
+        status="pending",
+        created_at=created_at,
     )
 
 
+@app.get("/api/queue")
+def get_queue(
+    status: Literal["pending", "approved", "rejected"] = Query("pending"),
+    db=Depends(get_db),
+) -> List[Dict]:
+    rows = db.execute(
+        "SELECT id, request_text, status, created_at, triage_json FROM requests WHERE status = ?",
+        (status,),
+    ).fetchall()
+    return [serialize_request(dict(row)).model_dump() for row in rows]
+
+
 @app.get("/api/requests/{request_id}")
-def get_request(request_id: str, db=Depends(get_db)) -> dict:
+def get_request(request_id: str, db=Depends(get_db)) -> Dict:
     row = db.execute(
-        "SELECT * FROM requests WHERE id = ?",
+        "SELECT id, request_text, status, created_at, triage_json FROM requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return serialize_request(dict(row)).model_dump()
+
+
+@app.post("/api/requests/{request_id}/decision")
+def post_decision(request_id: str, payload: DecisionPayload, db=Depends(get_db)) -> Dict:
+    row = db.execute(
+        "SELECT id, triage_json FROM requests WHERE id = ?",
         (request_id,),
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Request not found")
 
     triage = json.loads(row["triage_json"])
-    needs_human_review = triage.get("confidence", 1.0) < 0.65 or triage.get("risk_flags") != ["none"]
-    return {
-        "id": row["id"],
-        "created_at": row["created_at"],
-        "user_role": row["user_role"],
-        "modality_pref": row["modality_pref"],
-        "request_text": row["request_text"],
-        "tools_hint": row["tools_hint"],
-        "status": row["status"],
-        "triage": triage,
-        "triage_confidence": row["triage_confidence"],
-        "risk_flags": json.loads(row["risk_flags_json"]),
-        "needs_human_review": needs_human_review,
-    }
+    if payload.final_topic:
+        triage["issue_type"] = payload.final_topic
+    if payload.final_difficulty:
+        triage["urgency"] = payload.final_difficulty
+    if payload.final_handler:
+        triage["recommended_channel"] = payload.final_handler
 
-
-@app.get("/api/queue")
-def get_queue(status: str = Query(default="pending"), db=Depends(get_db)) -> List[dict]:
-    rows = db.execute(
-        "SELECT * FROM requests WHERE status = ? ORDER BY created_at ASC",
-        (status,),
-    ).fetchall()
-    response = []
-    for row in rows:
-        triage = json.loads(row["triage_json"])
-        needs_human_review = triage.get("confidence", 1.0) < 0.65 or triage.get("risk_flags") != ["none"]
-        response.append(
-            {
-                "id": row["id"],
-                "created_at": row["created_at"],
-                "user_role": row["user_role"],
-                "modality_pref": row["modality_pref"],
-                "request_text": row["request_text"],
-                "status": row["status"],
-                "triage": triage,
-                "needs_human_review": needs_human_review,
-            }
-        )
-    return response
-
-
-@app.post("/api/requests/{request_id}/decision")
-def create_decision(request_id: str, payload: DecisionCreate, db=Depends(get_db)) -> dict:
-    row = db.execute(
-        "SELECT id FROM requests WHERE id = ?",
-        (request_id,),
-    ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Request not found")
-
-    decision_id = str(uuid.uuid4())
-    decided_at = now_iso()
-    status = map_status(payload.action)
+    status = "approved" if payload.action == "approve" else "rejected"
+    decision_id = f"DEC-{uuid.uuid4()}"
+    decided_at = datetime.now(timezone.utc).isoformat()
 
     with db:
         db.execute(
             """
+            UPDATE requests
+            SET status = ?, triage_json = ?, triage_confidence = ?, risk_flags_json = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                json.dumps(triage, ensure_ascii=False),
+                triage.get("confidence", 0.5),
+                json.dumps(triage.get("risk_flags", []), ensure_ascii=False),
+                request_id,
+            ),
+        )
+        db.execute(
+            """
             INSERT INTO decisions (
-                id, request_id, decided_at, action, final_topic,
-                final_difficulty, final_handler, note
+                id,
+                request_id,
+                decided_at,
+                action,
+                final_topic,
+                final_difficulty,
+                final_handler,
+                note
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -187,76 +223,57 @@ def create_decision(request_id: str, payload: DecisionCreate, db=Depends(get_db)
                 payload.note,
             ),
         )
-        db.execute(
-            "UPDATE requests SET status = ? WHERE id = ?",
-            (status, request_id),
-        )
 
-    return {
-        "decision_id": decision_id,
-        "request_id": request_id,
-        "status": status,
-    }
+    updated = db.execute(
+        "SELECT id, request_text, status, created_at, triage_json FROM requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    return serialize_request(dict(updated)).model_dump()
 
 
 @app.get("/api/export/csv")
-def export_csv(status: str = Query(default="approved"), db=Depends(get_db)) -> Response:
+def export_csv(
+    status: Literal["pending", "approved", "rejected"] = Query("approved"),
+    db=Depends(get_db),
+) -> Response:
     rows = db.execute(
-        """
-        SELECT
-            requests.*, decisions.action AS decision_action,
-            decisions.final_topic, decisions.final_difficulty,
-            decisions.final_handler, decisions.note
-        FROM requests
-        LEFT JOIN decisions ON decisions.request_id = requests.id
-        WHERE requests.status = ?
-        ORDER BY requests.created_at ASC
-        """,
+        "SELECT id, request_text, status, created_at, triage_json FROM requests WHERE status = ?",
         (status,),
     ).fetchall()
 
-    output = StringIO()
+    output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
         [
-            "request_id",
-            "created_at",
-            "user_role",
-            "modality_pref",
-            "request_text",
+            "id",
+            "case_id",
+            "role",
+            "issue_type",
+            "urgency",
+            "risk_flags",
+            "recommended_channel",
+            "needs_followup",
+            "summary_ko",
+            "confidence",
             "status",
-            "triage_json",
-            "triage_confidence",
-            "risk_flags_json",
-            "decision_action",
-            "final_topic",
-            "final_difficulty",
-            "final_handler",
-            "note",
         ]
     )
     for row in rows:
+        triage = json.loads(row["triage_json"])
         writer.writerow(
             [
                 row["id"],
-                row["created_at"],
-                row["user_role"],
-                row["modality_pref"],
-                row["request_text"],
+                triage.get("case_id"),
+                triage.get("role"),
+                triage.get("issue_type"),
+                triage.get("urgency"),
+                "|".join(triage.get("risk_flags", [])),
+                triage.get("recommended_channel"),
+                triage.get("needs_followup"),
+                triage.get("summary_ko"),
+                triage.get("confidence"),
                 row["status"],
-                row["triage_json"],
-                row["triage_confidence"],
-                row["risk_flags_json"],
-                row["decision_action"],
-                row["final_topic"],
-                row["final_difficulty"],
-                row["final_handler"],
-                row["note"],
             ]
         )
 
-    return Response(
-        content=output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=export.csv"},
-    )
+    return Response(content=output.getvalue(), media_type="text/csv")
