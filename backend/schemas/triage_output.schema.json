@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TriageOutput",
+  "type": "object",
+  "required": [
+    "topic",
+    "difficulty",
+    "handler",
+    "confidence",
+    "risk_flags",
+    "needs_human_review",
+    "rationale",
+    "suggested_edits"
+  ],
+  "properties": {
+    "topic": {"type": "string"},
+    "difficulty": {"type": "string"},
+    "handler": {"type": "string"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "risk_flags": {
+      "type": "object",
+      "additionalProperties": {"type": "boolean"}
+    },
+    "needs_human_review": {"type": "boolean"},
+    "rationale": {"type": "string"},
+    "suggested_edits": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}
