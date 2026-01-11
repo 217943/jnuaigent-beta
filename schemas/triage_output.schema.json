@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AI Clinic Triage Output",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "description": "Client-side generated case identifier"
+    },
+    "role": {
+      "type": "string",
+      "enum": ["student", "professor", "staff", "other"]
+    },
+    "issue_type": {
+      "type": "string",
+      "enum": ["mental_health", "medical", "academic", "administrative", "safety", "other"]
+    },
+    "urgency": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "risk_flags": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "self_harm",
+          "harm_to_others",
+          "severe_distress",
+          "medical_emergency",
+          "abuse_or_violence",
+          "none"
+        ]
+      }
+    },
+    "recommended_channel": {
+      "type": "string",
+      "enum": [
+        "campus_counseling",
+        "campus_health_center",
+        "emergency_services",
+        "academic_advising",
+        "hr_admin",
+        "campus_security",
+        "other"
+      ]
+    },
+    "needs_followup": {
+      "type": "boolean"
+    },
+    "summary_ko": {
+      "type": "string",
+      "description": "Korean summary focused on classification"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "required": [
+    "case_id",
+    "role",
+    "issue_type",
+    "urgency",
+    "risk_flags",
+    "recommended_channel",
+    "needs_followup",
+    "summary_ko",
+    "confidence"
+  ]
+}
