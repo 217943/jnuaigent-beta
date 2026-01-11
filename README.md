@@ -14,15 +14,13 @@
 - `admin/` – Streamlit admin app (scaffold)
 
 ## Backend (FastAPI)
-> Scaffold only. Create your app entrypoint inside `backend/`.
-
-Example (planned):
+FastAPI 백엔드를 실행하는 방법입니다:
 ```bash
 cd backend
 python -m venv .venv
 source .venv/bin/activate
-pip install fastapi uvicorn
-uvicorn main:app --reload --port 8000
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
 ```
 
 ## Admin (Streamlit)
