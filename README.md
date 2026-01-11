@@ -24,15 +24,13 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 ## Admin (Streamlit)
-> Scaffold only. Create your app entrypoint inside `admin/`.
-
-Example (planned):
+Streamlit 관리자 UI를 실행하는 방법입니다:
 ```bash
 cd admin
 python -m venv .venv
 source .venv/bin/activate
-pip install streamlit
-streamlit run app.py --server.port 8501
+pip install -r requirements.txt
+streamlit run admin_app.py
 ```
 
 ## Notes
